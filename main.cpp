@@ -1,4 +1,4 @@
-#include <llvm/ADT/APFloat.h>
+#include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
@@ -14,6 +14,8 @@
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Scalar/GVN.h"
 #include "llvm/Transforms/Utils.h"
+#include "llvm/Support/TargetSelect.h"
+#include "KaleidoscopeJIT.h"
 #include "gen/LucixLexer.h"
 #include "gen/LucixBaseVisitor.h"
 
@@ -26,11 +28,11 @@ class CodeGen : LucixBaseVisitor {
     std::map<std::string, Function *> functionTable;
     std::unique_ptr<legacy::FunctionPassManager> fpm;
     std::map<std::string, Type *> typeMap;
-public:
-    std::unique_ptr<Module> module;
+    std::unique_ptr<orc::KaleidoscopeJIT> jit;
 
-    CodeGen() : builder(IRBuilder<>(llvmContext)) {
-        module = std::make_unique<Module>("testModule", llvmContext);
+    void initModuleAndFunctionPassManager() {
+        module = std::make_unique<Module>("simple jit", llvmContext);
+        module->setDataLayout(jit->getDataLayout());
         fpm = std::make_unique<legacy::FunctionPassManager>(module.get());
         fpm->add(createInstructionCombiningPass());
         fpm->add(createReassociatePass());
@@ -38,8 +40,17 @@ public:
         fpm->add(createCFGSimplificationPass());
         fpm->add(createPromoteMemoryToRegisterPass());
         fpm->doInitialization();
+    }
+
+public:
+    std::unique_ptr<Module> module;
+
+    CodeGen() : builder(IRBuilder<>(llvmContext)) {
         typeMap = {{"i32", Type::getInt32Ty(llvmContext)},
                    {"",    Type::getVoidTy(llvmContext)}};
+        orc::KaleidoscopeJIT::Create().get();
+        jit = std::move(orc::KaleidoscopeJIT::Create().get());
+        initModuleAndFunctionPassManager();
     }
 
     antlrcpp::Any visitApplication(LucixParser::ApplicationContext *ctx) override {
@@ -95,6 +106,16 @@ private:
         visitChildren(context);
         symbolTables.pop_back();
         functionTable[function->getName()] = function;
+        module->print(errs(), nullptr);
+
+        auto t = jit->addModule(std::move(module));
+        auto symbol = jit->lookup("test");
+        assert(symbol);
+
+        auto FP = Expected<JITTargetAddress>(symbol->getAddress());
+        auto x = (int (*)()) (intptr_t) FP.get();
+        std::cout << x() << std::endl;
+
         return antlrcpp::Any();
     }
 
@@ -146,8 +167,6 @@ private:
             builder.CreateBr(doneBlock);
         }
         builder.SetInsertPoint(doneBlock);
-        // auto phiNode = builder.CreatePHI(typeMap::getInt32Ty(llvmContext), 2, "if_tmp");
-        // phiNode->addIncoming();
         return antlrcpp::Any();
     }
 
@@ -182,6 +201,9 @@ private:
 
 int main(int argc, char *argv[]) {
     auto file = std::ifstream(argv[1]);
+    InitializeNativeTarget();
+    InitializeNativeTargetAsmPrinter();
+    InitializeNativeTargetAsmParser();
     antlr4::ANTLRInputStream inputStream(file);
     LucixLexer lexer(&inputStream);
     antlr4::CommonTokenStream tokens(&lexer);
@@ -189,5 +211,5 @@ int main(int argc, char *argv[]) {
     auto tree = parser.application();
     auto codegen = CodeGen();
     codegen.visitApplication(tree);
-    codegen.module->print(errs(), nullptr);
+    // codegen.module->print(errs(), nullptr);
 }
