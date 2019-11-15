@@ -9,7 +9,9 @@ jobs:
     
     steps:
     - uses: actions/checkout@v1
+    - name: install stuff
+      run: sudo apt-get install libantlr4-runtime-dev llvm
     - name: configure
       run: mkdir build && cd build && cmake ..
     - name: make
-      run: make
+      run: cd build && make
